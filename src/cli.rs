@@ -51,6 +51,9 @@ pub enum Commands {
         project: Option<String>,
     },
     
+    /// Start interactive mode
+    Interactive,
+    
     /// Project management commands
     Project {
         #[command(subcommand)]
