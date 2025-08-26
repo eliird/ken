@@ -35,6 +35,7 @@ impl KenCompleter {
                 "/context".to_string(),
                 "/update-context".to_string(),
                 "/list-tools".to_string(),
+                "/restart-mcp".to_string(),
                 "exit".to_string(),
                 "quit".to_string(),
             ],
@@ -142,14 +143,24 @@ impl KenSession {
             None
         };
         
-        Ok(KenSession {
+        let mut session = KenSession {
             config,
             editor,
             agent,
             mcp_client: None,
             mcp_tools: None,
             mcp_server_process: None,
-        })
+        };
+        
+        // Start MCP server immediately if we have config
+        if session.config.is_some() {
+            if let Err(e) = session.start_mcp_server().await {
+                println!("⚠️  GitLab MCP server failed to start: {}", e);
+                println!("    You can try restarting with /logout and /login");
+            }
+        }
+        
+        Ok(session)
     }
     
     pub async fn start_interactive(&mut self) -> Result<()> {
@@ -244,6 +255,7 @@ impl KenSession {
                 println!("  /context        - View cached project context");
                 println!("  /update-context - Update project context from GitLab");
                 println!("  /list-tools     - List available GitLab MCP tools");
+                println!("  /restart-mcp    - Restart GitLab MCP server");
                 println!("  exit            - Quit Ken");
             }
             "/login" => {
@@ -256,11 +268,9 @@ impl KenSession {
                 new_config.save()?;
                 self.config = Some(new_config);
                 
-                // Initialize MCP client and agent after successful login
-                if let Err(e) = self.initialize_mcp_integration().await {
-                    println!("⚠️  GitLab tools unavailable: {}", e);
-                } else {
-                    println!("🔧 GitLab MCP tools initialized");
+                // Start MCP server and initialize integration after successful login
+                if let Err(e) = self.start_mcp_server().await {
+                    println!("⚠️  GitLab MCP server failed to start: {}", e);
                 }
                 
                 // Initialize agent with MCP tools if available
@@ -283,11 +293,8 @@ impl KenSession {
                     self.mcp_client = None;
                     self.mcp_tools = None;
                     
-                    // Kill MCP server process if running
-                    if let Some(mut process) = self.mcp_server_process.take() {
-                        let _ = process.kill().await;
-                        println!("🛑 Stopped GitLab MCP server");
-                    }
+                    // Note: Keep MCP server running, just disconnect client
+                    println!("🔌 Disconnected from GitLab MCP server");
                     
                     println!("✅ Logged out successfully!");
                 } else {
@@ -410,6 +417,38 @@ impl KenSession {
                     println!("❌ No MCP tools available. Make sure you're logged in and MCP server is running.");
                 }
             }
+            "/restart-mcp" => {
+                if self.config.is_some() {
+                    println!("🔄 Restarting GitLab MCP server...");
+                    
+                    // Kill existing server
+                    if let Some(mut process) = self.mcp_server_process.take() {
+                        let _ = process.kill().await;
+                        println!("🛑 Stopped existing MCP server");
+                    }
+                    
+                    // Clear existing connections
+                    self.mcp_client = None;
+                    self.mcp_tools = None;
+                    
+                    // Restart server
+                    match self.start_mcp_server().await {
+                        Ok(_) => {
+                            println!("✅ MCP server restarted successfully!");
+                            
+                            // Reinitialize agent with new MCP connection
+                            if let (Some(config), Some(mcp_client), Some(tools)) = (&self.config, &self.mcp_client, &self.mcp_tools) {
+                                self.agent = Some(KenAgent::with_mcp_tools(config, mcp_client, tools.clone()));
+                            }
+                        }
+                        Err(e) => {
+                            println!("❌ Failed to restart MCP server: {}", e);
+                        }
+                    }
+                } else {
+                    println!("❌ Not authenticated. Use '/login' first.");
+                }
+            }
             _ => {
                 println!("❓ Unknown command: {}. Type '/help' for available commands.", command);
             }
@@ -488,8 +527,14 @@ impl KenSession {
         Ok(())
     }
     
-    async fn initialize_mcp_integration(&mut self) -> Result<()> {
+    async fn start_mcp_server(&mut self) -> Result<()> {
         let config = self.config.as_ref().ok_or_else(|| anyhow::anyhow!("No config available"))?;
+        
+        // If MCP server is already running, just try to reconnect
+        if self.mcp_server_process.is_some() {
+            println!("🔄 MCP server already running, reconnecting...");
+            return self.connect_to_mcp_server().await;
+        }
         
         // Start the GitLab MCP server as a subprocess
         println!("🚀 Starting GitLab MCP server...");
@@ -513,6 +558,10 @@ impl KenSession {
         println!("⏳ Waiting for MCP server to start...");
         tokio::time::sleep(Duration::from_secs(3)).await;
         
+        self.connect_to_mcp_server().await
+    }
+    
+    async fn connect_to_mcp_server(&mut self) -> Result<()> {
         // Connect to the MCP server
         let mcp_server_url = "http://localhost:3002/sse";
         println!("🔄 Connecting to GitLab MCP server at {}...", mcp_server_url);
