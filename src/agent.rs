@@ -2,8 +2,6 @@ use rig::agent::Agent;
 use rig::agent::AgentBuilder;
 use rig::client::CompletionClient;
 use rig::providers::openai;
-use std::fs;
-use std::io;
 use mcp_core::types::ToolsListResponse;
 
 pub struct AgentConfig{

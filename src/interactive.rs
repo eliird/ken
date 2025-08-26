@@ -8,9 +8,13 @@ use rustyline::Context;
 use crate::config::Config;
 use crate::agent::KenAgent;
 use crate::context::ProjectContext;
+use crate::mcp_client::MCPClient;
 use rig::agent::Agent;
 use rig::providers::openai;
 use rig::completion::Chat;
+use mcp_core::types::ToolsListResponse;
+use tokio::process::{Child, Command};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct KenCompleter {
@@ -30,6 +34,7 @@ impl KenCompleter {
                 "/current".to_string(),
                 "/context".to_string(),
                 "/update-context".to_string(),
+                "/list-tools".to_string(),
                 "exit".to_string(),
                 "quit".to_string(),
             ],
@@ -115,6 +120,9 @@ pub struct KenSession {
     pub config: Option<Config>,
     pub editor: Editor<KenCompleter, rustyline::history::DefaultHistory>,
     pub agent: Option<Agent<openai::CompletionModel>>,
+    pub mcp_client: Option<MCPClient>,
+    pub mcp_tools: Option<ToolsListResponse>,
+    pub mcp_server_process: Option<Child>,
 }
 
 impl KenSession {
@@ -138,6 +146,9 @@ impl KenSession {
             config,
             editor,
             agent,
+            mcp_client: None,
+            mcp_tools: None,
+            mcp_server_process: None,
         })
     }
     
@@ -165,6 +176,7 @@ impl KenSession {
                     // Handle exit commands
                     if matches!(trimmed.to_lowercase().as_str(), "exit" | "quit" | "/exit" | "/quit") {
                         println!("👋 Goodbye!");
+                        self.cleanup().await;
                         break;
                     }
                     
@@ -176,11 +188,13 @@ impl KenSession {
                 Err(rustyline::error::ReadlineError::Interrupted) => {
                     // Ctrl-C
                     println!("👋 Goodbye!");
+                    self.cleanup().await;
                     break;
                 }
                 Err(rustyline::error::ReadlineError::Eof) => {
                     // Ctrl-D
                     println!("👋 Goodbye!");
+                    self.cleanup().await;
                     break;
                 }
                 Err(err) => {
@@ -229,6 +243,7 @@ impl KenSession {
                 println!("  /current        - Show current project");
                 println!("  /context        - View cached project context");
                 println!("  /update-context - Update project context from GitLab");
+                println!("  /list-tools     - List available GitLab MCP tools");
                 println!("  exit            - Quit Ken");
             }
             "/login" => {
@@ -241,8 +256,19 @@ impl KenSession {
                 new_config.save()?;
                 self.config = Some(new_config);
                 
-                // Initialize agent after successful login
-                self.agent = Some(KenAgent::default());
+                // Initialize MCP client and agent after successful login
+                if let Err(e) = self.initialize_mcp_integration().await {
+                    println!("⚠️  GitLab tools unavailable: {}", e);
+                } else {
+                    println!("🔧 GitLab MCP tools initialized");
+                }
+                
+                // Initialize agent with MCP tools if available
+                if let (Some(config), Some(mcp_client), Some(tools)) = (&self.config, &self.mcp_client, &self.mcp_tools) {
+                    self.agent = Some(KenAgent::with_mcp_tools(config, mcp_client, tools.clone()));
+                } else {
+                    self.agent = Some(KenAgent::default());
+                }
                 
                 println!("✅ Login successful!");
             }
@@ -254,6 +280,15 @@ impl KenSession {
                     }
                     self.config = None;
                     self.agent = None;
+                    self.mcp_client = None;
+                    self.mcp_tools = None;
+                    
+                    // Kill MCP server process if running
+                    if let Some(mut process) = self.mcp_server_process.take() {
+                        let _ = process.kill().await;
+                        println!("🛑 Stopped GitLab MCP server");
+                    }
+                    
                     println!("✅ Logged out successfully!");
                 } else {
                     println!("❌ Not currently logged in.");
@@ -343,7 +378,11 @@ impl KenSession {
                                 }
                                 
                                 // Reinitialize agent with updated context
-                                self.agent = Some(KenAgent::default());
+                                if let (Some(config), Some(mcp_client), Some(tools)) = (&self.config, &self.mcp_client, &self.mcp_tools) {
+                                    self.agent = Some(KenAgent::with_mcp_tools(config, mcp_client, tools.clone()));
+                                } else {
+                                    self.agent = Some(KenAgent::default());
+                                }
                             }
                             Err(e) => {
                                 println!("❌ Failed to update context: {}", e);
@@ -354,6 +393,21 @@ impl KenSession {
                     }
                 } else {
                     println!("❌ Not authenticated. Use '/login' first.");
+                }
+            }
+            "/list-tools" => {
+                if let Some(ref tools) = self.mcp_tools {
+                    println!("🔧 Available GitLab MCP Tools ({} total):", tools.tools.len());
+                    println!("─────────────────────────────────────");
+                    
+                    for (i, tool) in tools.tools.iter().enumerate() {
+                        let desc = tool.description.as_deref().unwrap_or("No description");
+                        println!("{}. {} - {}", i + 1, tool.name, desc);
+                    }
+                    
+                    println!("\n💡 These tools are available for natural language queries");
+                } else {
+                    println!("❌ No MCP tools available. Make sure you're logged in and MCP server is running.");
                 }
             }
             _ => {
@@ -432,5 +486,74 @@ impl KenSession {
         }
         
         Ok(())
+    }
+    
+    async fn initialize_mcp_integration(&mut self) -> Result<()> {
+        let config = self.config.as_ref().ok_or_else(|| anyhow::anyhow!("No config available"))?;
+        
+        // Start the GitLab MCP server as a subprocess
+        println!("🚀 Starting GitLab MCP server...");
+        
+        let mut cmd = Command::new("node");
+        cmd.current_dir("gitlab-mcp")
+            .arg("build/index.js")
+            .env("GITLAB_PERSONAL_ACCESS_TOKEN", &config.api_token)
+            .env("GITLAB_API_URL", &config.gitlab_url)
+            .env("SSE", "true")
+            .kill_on_drop(true);
+        
+        // Set project ID if available
+        if let Some(ref project_id) = config.default_project_id {
+            cmd.env("GITLAB_PROJECT_ID", project_id);
+        }
+        
+        let child = cmd.spawn().map_err(|e| anyhow::anyhow!("Failed to start MCP server: {}. Make sure Node.js is installed and gitlab-mcp is built.", e))?;
+        self.mcp_server_process = Some(child);
+        
+        println!("⏳ Waiting for MCP server to start...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        
+        // Connect to the MCP server
+        let mcp_server_url = "http://localhost:3002/sse";
+        println!("🔄 Connecting to GitLab MCP server at {}...", mcp_server_url);
+        
+        // Retry connection a few times as server might take time to start
+        let mut retries = 5;
+        while retries > 0 {
+            match MCPClient::new(mcp_server_url).await {
+                Ok(client) => {
+                    println!("✅ Connected to MCP server");
+                    
+                    // Get available tools
+                    match client.get_tools_list().await {
+                        Ok(tools) => {
+                            println!("📋 Loaded {} GitLab tools", tools.tools.len());
+                            self.mcp_tools = Some(tools);
+                            self.mcp_client = Some(client);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            println!("⚠️  Failed to get tools list: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(_) => {
+                    retries -= 1;
+                    if retries > 0 {
+                        println!("⏳ Retrying connection... ({} attempts left)", retries);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("Failed to connect to MCP server after multiple attempts"))
+    }
+    
+    async fn cleanup(&mut self) {
+        if let Some(mut process) = self.mcp_server_process.take() {
+            let _ = process.kill().await;
+        }
     }
 }
