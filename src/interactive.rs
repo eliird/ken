@@ -455,7 +455,7 @@ impl KenSession {
             }
             "/create" => {
                 println!("✨ What would you like to create?");
-                println!("1. Issue (bug report, feature request, etc.)");
+                println!("1. Issue (bug report, feature request, task, etc.)");
                 println!("2. Merge Request");
                 println!();
                 
@@ -464,30 +464,10 @@ impl KenSession {
                     Ok(choice) => {
                         match choice.trim() {
                             "1" => {
-                                let desc_readline = self.editor.readline("Describe the issue: ");
-                                match desc_readline {
-                                    Ok(description) => {
-                                        if !description.trim().is_empty() {
-                                            println!("🔄 Creating issue...");
-                                            let query = format!("Create a new issue with the following description: {}", description);
-                                            match self.query_with_context(&query).await {
-                                                Ok(response) => {
-                                                    println!("\n{}", response);
-                                                }
-                                                Err(e) => {
-                                                    println!("❌ {}", e);
-                                                }
-                                            }
-                                        } else {
-                                            println!("❌ Issue description cannot be empty.");
-                                        }
-                                    }
-                                    Err(_) => println!("❌ Failed to read input."),
-                                }
+                                self.create_issue_with_template().await;
                             }
                             "2" => {
-                                println!("📝 Merge request creation coming soon!");
-                                println!("For now, use natural language: 'create a merge request for...'");
+                                self.create_mr_with_template().await;
                             }
                             _ => {
                                 println!("❌ Invalid choice. Please enter 1 or 2.");
@@ -732,6 +712,207 @@ impl KenSession {
             println!("❌ Not authenticated. Use '/login' first.");
         }
         Ok(())
+    }
+    
+    fn get_issue_template() -> String {
+        r#"## 背景
+
+このissueが切られた経緯や背景情報を記入してください
+
+## 作業項目
+
+1. [ ] 実際に作業する内容を（可能であれば順番に）列挙してください
+
+## 完了条件
+
+* [ ] どのような状態になっていれば完了としてよいかの条件を列挙してください"#.to_string()
+    }
+    
+    fn get_mr_template() -> String {
+        r#"## 概要
+（何を目的としたどんな変更か）
+
+## 検証項目
+（このMRの変更に対する検証の内容について）
+
+## 重点レビュー箇所
+（特にレビュワーに見てほしいものがあればリスト形式で記載。特になくてもいい）
+
+## 関連Issue
+tasks#"#.to_string()
+    }
+    
+    async fn create_issue_with_template(&mut self) {
+        println!("📝 Creating Issue with Template");
+        println!("─────────────────────────────────");
+        
+        // Get issue title
+        let title = match self.editor.readline("Issue Title: ") {
+            Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+            _ => {
+                println!("❌ Issue title cannot be empty.");
+                return;
+            }
+        };
+        
+        // Get background
+        println!("\n💡 背景 (Background - why this issue is being created):");
+        let background = match self.editor.readline("> ") {
+            Ok(b) if !b.trim().is_empty() => b.trim().to_string(),
+            _ => "詳細は後ほど記載".to_string()
+        };
+        
+        // Get work items
+        println!("\n📋 作業項目 (Work items - enter items separated by comma):");
+        println!("   Example: APIの実装, テストの追加, ドキュメントの更新");
+        let work_items_input = self.editor.readline("> ").unwrap_or_default();
+        let work_items: Vec<String> = if !work_items_input.trim().is_empty() {
+            work_items_input.split(',')
+                .map(|s| format!("[ ] {}", s.trim()))
+                .collect()
+        } else {
+            vec!["[ ] 作業項目を追加してください".to_string()]
+        };
+        
+        // Get completion conditions
+        println!("\n✅ 完了条件 (Completion conditions - enter conditions separated by comma):");
+        println!("   Example: すべてのテストがパス, コードレビュー完了");
+        let completion_input = self.editor.readline("> ").unwrap_or_default();
+        let completion_conditions: Vec<String> = if !completion_input.trim().is_empty() {
+            completion_input.split(',')
+                .map(|s| format!("[ ] {}", s.trim()))
+                .collect()
+        } else {
+            vec!["[ ] 完了条件を追加してください".to_string()]
+        };
+        
+        // Build the issue description
+        let mut description = format!("## 背景\n\n{}\n\n## 作業項目\n\n", background);
+        for (i, item) in work_items.iter().enumerate() {
+            description.push_str(&format!("{}. {}\n", i + 1, item));
+        }
+        description.push_str("\n## 完了条件\n\n");
+        for condition in completion_conditions {
+            description.push_str(&format!("* {}\n", condition));
+        }
+        
+        // Create the issue
+        println!("\n🔄 Creating issue with formatted template...");
+        let query = format!(
+            "Create a new GitLab issue with title: '{}' and description:\n{}",
+            title, description
+        );
+        
+        match self.query_with_context(&query).await {
+            Ok(response) => {
+                println!("\n✅ {}", response);
+            }
+            Err(e) => {
+                println!("❌ {}", e);
+            }
+        }
+    }
+    
+    async fn create_mr_with_template(&mut self) {
+        println!("🔀 Creating Merge Request with Template");
+        println!("─────────────────────────────────────────");
+        
+        // Get MR title
+        let title = match self.editor.readline("MR Title: ") {
+            Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+            _ => {
+                println!("❌ MR title cannot be empty.");
+                return;
+            }
+        };
+        
+        // Get source branch
+        let source_branch = match self.editor.readline("Source Branch: ") {
+            Ok(b) if !b.trim().is_empty() => b.trim().to_string(),
+            _ => {
+                println!("❌ Source branch cannot be empty.");
+                return;
+            }
+        };
+        
+        // Get target branch
+        println!("Target Branch (default: main): ");
+        let target_branch = match self.editor.readline("> ") {
+            Ok(b) if !b.trim().is_empty() => b.trim().to_string(),
+            _ => "main".to_string()
+        };
+        
+        // Get overview
+        println!("\n📄 概要 (Overview - what changes and why):");
+        let overview = match self.editor.readline("> ") {
+            Ok(o) if !o.trim().is_empty() => o.trim().to_string(),
+            _ => "変更内容の概要".to_string()
+        };
+        
+        // Get verification items
+        println!("\n🔍 検証項目 (Verification items - how to test, separated by comma):");
+        let verification_input = self.editor.readline("> ").unwrap_or_default();
+        let verification_items = if !verification_input.trim().is_empty() {
+            verification_input.split(',')
+                .map(|s| format!("- {}", s.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            "- 検証項目を追加してください".to_string()
+        };
+        
+        // Get review focus points
+        println!("\n🎯 重点レビュー箇所 (Key review points - optional, separated by comma):");
+        let review_input = self.editor.readline("> ").unwrap_or_default();
+        let review_points = if !review_input.trim().is_empty() {
+            review_input.split(',')
+                .map(|s| format!("- {}", s.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            "特になし".to_string()
+        };
+        
+        // Get related issue
+        println!("\n🔗 関連Issue番号 (Related issue number, e.g., 1234):");
+        let issue_number = self.editor.readline("> ").unwrap_or_default();
+        let related_issue = if !issue_number.trim().is_empty() {
+            format!("tasks#{}", issue_number.trim())
+        } else {
+            "tasks#".to_string()
+        };
+        
+        // Build the MR description
+        let description = format!(
+            r#"## 概要
+{}
+
+## 検証項目
+{}
+
+## 重点レビュー箇所
+{}
+
+## 関連Issue
+{}"#,
+            overview, verification_items, review_points, related_issue
+        );
+        
+        // Create the MR
+        println!("\n🔄 Creating merge request with formatted template...");
+        let query = format!(
+            "Create a new GitLab merge request with title: '{}', source branch: '{}', target branch: '{}', and description:\n{}",
+            title, source_branch, target_branch, description
+        );
+        
+        match self.query_with_context(&query).await {
+            Ok(response) => {
+                println!("\n✅ {}", response);
+            }
+            Err(e) => {
+                println!("❌ {}", e);
+            }
+        }
     }
 
     async fn cleanup(&mut self) {
