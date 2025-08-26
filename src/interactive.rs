@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::agent::KenAgent;
 use crate::context::ProjectContext;
 use crate::mcp_client::MCPClient;
+use crate::gitlab_tools::GitLabTools;
 use rig::agent::Agent;
 use rig::providers::openai;
 use rig::completion::Chat;
@@ -482,23 +483,17 @@ impl KenSession {
             "/workload" => {
                 println!("📊 Analyzing team workload...");
                 
-                let query = r#"I need to analyze the team workload distribution. Please follow these steps:
-
-1. First, use the `list_project_members` tool to get all project members with their full names and roles
-2. Then, for EACH team member, use the `list_issues` tool with parameters: scope='all' and assignee=username to get their open issues
-3. Then, for EACH team member, use the `list_merge_requests` tool with assignee=username to get their open MRs
-4. Count the actual numbers and calculate load scores: (Issues * 1) + (MRs * 2)
-5. Present results in table format showing only members with Load Score > 0
-
-Do NOT just use cached context data - make actual API calls with the MCP tools to get current data."#;
-                
-                match self.query_with_context(&query).await {
-                    Ok(response) => {
-                        println!("\n{}", response);
+                if let Some(ref config) = self.config {
+                    match self.analyze_workload_direct(config).await {
+                        Ok(()) => {
+                            // Analysis completed and displayed
+                        }
+                        Err(e) => {
+                            println!("❌ Failed to analyze workload: {}", e);
+                        }
                     }
-                    Err(e) => {
-                        println!("❌ {}", e);
-                    }
+                } else {
+                    println!("❌ Not authenticated. Use '/login' first.");
                 }
             }
             _ => {
@@ -937,6 +932,78 @@ tasks#"#.to_string()
                 println!("❌ {}", e);
             }
         }
+    }
+
+    async fn analyze_workload_direct(&self, config: &Config) -> Result<()> {
+        let gitlab = GitLabTools::new(config.clone());
+        
+        println!("🔄 Fetching project members...");
+        let members = gitlab.get_project_members().await?;
+        println!("👥 Found {} project members", members.len());
+        
+        println!("🔄 Analyzing individual workloads...");
+        let mut workloads = Vec::new();
+        
+        for member in &members {
+            let issues = gitlab.get_issues_by_assignee(&member.username).await.unwrap_or_default();
+            let mrs = gitlab.get_mrs_by_assignee(&member.username).await.unwrap_or_default();
+            let load_score = issues.len() + (mrs.len() * 2);
+            
+            if load_score > 0 {
+                workloads.push((member, issues.len(), mrs.len(), load_score));
+            }
+        }
+        
+        // Sort by load score (highest first)
+        workloads.sort_by(|a, b| b.3.cmp(&a.3));
+        
+        println!("\n📊 **Team Workload Analysis**\n");
+        println!("| Full Name (username) | Role | Open Issues | Open MRs | Load Score | Status |");
+        println!("|---------------------|------|------------|----------|------------|--------|");
+        
+        for (member, issues, mrs, load_score) in &workloads {
+            let status = match *load_score {
+                score if score > 8 => "🔴 High",
+                score if score >= 4 => "🟡 Medium", 
+                _ => "🟢 Low"
+            };
+            
+            println!("| {} ({}) | {} | {} | {} | {} | {} |",
+                member.name,
+                member.username,
+                member.role_name,
+                issues,
+                mrs,
+                load_score,
+                status
+            );
+        }
+        
+        // Get unassigned issues
+        println!("\n🔄 Checking for unassigned work...");
+        let all_issues = gitlab.get_all_open_issues().await?;
+        let unassigned_issues: Vec<_> = all_issues.iter()
+            .filter(|issue| issue.assignee.is_none())
+            .collect();
+        
+        println!("\n📈 **Summary & Recommendations:**");
+        println!("- 🔴 High workload (>8): {} members", workloads.iter().filter(|w| w.3 > 8).count());
+        println!("- 🟡 Medium workload (4-8): {} members", workloads.iter().filter(|w| w.3 >= 4 && w.3 <= 8).count());
+        println!("- 🟢 Low workload (<4): {} members", workloads.iter().filter(|w| w.3 < 4).count());
+        println!("- 📋 Total active members: {}", workloads.len());
+        println!("- ❓ Unassigned issues: {}", unassigned_issues.len());
+        
+        if !unassigned_issues.is_empty() {
+            println!("\n🔗 **Unassigned Issues:**");
+            for issue in unassigned_issues.iter().take(5) {
+                println!("  - Issue #{}: {}", issue.iid, issue.title);
+            }
+            if unassigned_issues.len() > 5 {
+                println!("  ... and {} more", unassigned_issues.len() - 5);
+            }
+        }
+        
+        Ok(())
     }
 
     async fn cleanup(&mut self) {

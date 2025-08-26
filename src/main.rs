@@ -3,6 +3,7 @@ mod config;
 mod context;
 mod interactive;
 mod mcp_client;
+mod gitlab_tools;
 
 use anyhow::Result;
 
