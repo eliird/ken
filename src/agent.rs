@@ -44,21 +44,35 @@ impl AgentConfig{
 impl KenAgent{
     pub fn default() -> Agent<openai::CompletionModel> {
         let config = AgentConfig::default();
-
         Self::get_agent(&config)
     }
 
     pub fn agent_with_config(cfg: AgentConfig) -> Agent<openai::CompletionModel>{
         Self::get_agent(&cfg)
     }
+    
+    pub fn with_gitlab_tools(gitlab_config: &crate::config::Config) -> Agent<openai::CompletionModel> {
+        let config = AgentConfig::default();
+        let model = openai::Client::from_url(&config.api_key, &config.base_url)
+            .completion_model(&config.model_name);
+        
+        let tool = crate::tools::ListIssuesTool::from_config(gitlab_config);
+        
+        AgentBuilder::new(model)
+            .preamble(&config.prompt)
+            .temperature(config.temperature)
+            .max_tokens(config.max_tokens)
+            .tool(tool)
+            .build()
+    }
 
     fn get_agent(cfg: &AgentConfig) -> Agent<openai::CompletionModel>{
-        let model = openai::Client::from_url(&cfg.api_key, &cfg.base_url).completion_model(&cfg.model_name);
-        let builder = AgentBuilder::new(model)
-        .preamble(&cfg.prompt)
-        .temperature(cfg.temperature)
-        .max_tokens(cfg.max_tokens);
-
-        builder.build()
+        let model = openai::Client::from_url(&cfg.api_key, &cfg.base_url)
+            .completion_model(&cfg.model_name);
+        AgentBuilder::new(model)
+            .preamble(&cfg.prompt)
+            .temperature(cfg.temperature)
+            .max_tokens(cfg.max_tokens)
+            .build()
     }
 }

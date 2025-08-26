@@ -14,10 +14,14 @@ mcp-core = { version = "0.1.50", features = ["sse"] }
 tracing-subscriber = "0.3"
 async-trait = "0.1.88"
 clap = { version = "4.3", features = ["derive"] }
-reqwest = "0.12.20"
+reqwest = { version = "0.12.20", features = ["blocking", "json"] }
 schemars = "0.8" # rig-core's tool system uses this for schema generation
 axum = "0.7"
 walkdir = "2"
 chrono = "0.4"
 thiserror = "1"
 serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+dirs = "5.0"
+rpassword = "7.3"
+urlencoding = "2.1"
