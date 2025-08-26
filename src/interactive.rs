@@ -36,6 +36,9 @@ impl KenCompleter {
                 "/update-context".to_string(),
                 "/list-tools".to_string(),
                 "/restart-mcp".to_string(),
+                "/issues".to_string(),
+                "/mrs".to_string(),
+                "/create".to_string(),
                 "exit".to_string(),
                 "quit".to_string(),
             ],
@@ -242,6 +245,16 @@ impl KenSession {
     }
     
     async fn handle_command(&mut self, command: &str) -> Result<()> {
+        // Handle commands with parameters
+        if command.starts_with("/issues") {
+            return self.handle_issues_command(command).await;
+        } else if command.starts_with("/mrs") {
+            return self.handle_mrs_command(command).await;
+        } else if command.starts_with("/project ") {
+            return self.handle_project_command(command).await;
+        }
+        
+        // Handle exact match commands
         match command {
             "/help" => {
                 println!("📋 Available Commands:");
@@ -256,6 +269,9 @@ impl KenSession {
                 println!("  /update-context - Update project context from GitLab");
                 println!("  /list-tools     - List available GitLab MCP tools");
                 println!("  /restart-mcp    - Restart GitLab MCP server");
+                println!("  /issues [filter] - List project issues (optional: filter text)");
+                println!("  /mrs [filter]    - List merge requests (optional: filter text)");
+                println!("  /create         - Create new issue or merge request");
                 println!("  exit            - Quit Ken");
             }
             "/login" => {
@@ -359,18 +375,6 @@ impl KenSession {
                     println!("❌ Not authenticated. Use '/login' first.");
                 }
             }
-            _ if command.starts_with("/project ") => {
-                let project_id = command[9..].trim(); // Remove "/project "
-                if project_id.is_empty() {
-                    println!("❌ Please specify a project ID: /project <id>");
-                } else if let Some(ref mut config) = self.config {
-                    config.default_project_id = Some(project_id.to_string());
-                    config.save()?;
-                    println!("✅ Default project set to: {}", project_id);
-                } else {
-                    println!("❌ Not authenticated. Use '/login' first.");
-                }
-            }
             "/update-context" => {
                 if let Some(ref config) = self.config {
                     if let Some(ref project_id) = config.default_project_id {
@@ -447,6 +451,50 @@ impl KenSession {
                     }
                 } else {
                     println!("❌ Not authenticated. Use '/login' first.");
+                }
+            }
+            "/create" => {
+                println!("✨ What would you like to create?");
+                println!("1. Issue (bug report, feature request, etc.)");
+                println!("2. Merge Request");
+                println!();
+                
+                let readline = self.editor.readline("Enter choice (1 or 2): ");
+                match readline {
+                    Ok(choice) => {
+                        match choice.trim() {
+                            "1" => {
+                                let desc_readline = self.editor.readline("Describe the issue: ");
+                                match desc_readline {
+                                    Ok(description) => {
+                                        if !description.trim().is_empty() {
+                                            println!("🔄 Creating issue...");
+                                            let query = format!("Create a new issue with the following description: {}", description);
+                                            match self.query_with_context(&query).await {
+                                                Ok(response) => {
+                                                    println!("\n{}", response);
+                                                }
+                                                Err(e) => {
+                                                    println!("❌ {}", e);
+                                                }
+                                            }
+                                        } else {
+                                            println!("❌ Issue description cannot be empty.");
+                                        }
+                                    }
+                                    Err(_) => println!("❌ Failed to read input."),
+                                }
+                            }
+                            "2" => {
+                                println!("📝 Merge request creation coming soon!");
+                                println!("For now, use natural language: 'create a merge request for...'");
+                            }
+                            _ => {
+                                println!("❌ Invalid choice. Please enter 1 or 2.");
+                            }
+                        }
+                    }
+                    Err(_) => println!("❌ Failed to read input."),
                 }
             }
             _ => {
@@ -600,6 +648,92 @@ impl KenSession {
         Err(anyhow::anyhow!("Failed to connect to MCP server after multiple attempts"))
     }
     
+    async fn query_with_context(&self, query: &str) -> Result<String> {
+        if let Some(ref agent) = self.agent {
+            if let Some(ref config) = self.config {
+                if let Some(ref project_id) = config.default_project_id {
+                    // Try to load context to enhance the query
+                    let context_info = match ProjectContext::load(project_id) {
+                        Ok(context) => context.to_prompt_context(),
+                        Err(_) => "No project context available. Use '/update-context' to fetch it.".to_string()
+                    };
+                    
+                    let enhanced_query = format!(
+                        "Project Context:\n{}\n\nCurrent Project: {}\nGitLab API URL: {}\n\nUser Query: {}", 
+                        context_info, project_id, config.gitlab_url, query
+                    );
+                    
+                    match agent.chat(&enhanced_query, vec![]).await {
+                        Ok(response) => Ok(response),
+                        Err(e) => Err(anyhow::anyhow!("Error processing query: {}", e))
+                    }
+                } else {
+                    Err(anyhow::anyhow!("No project set. Use '/project <id>' to set a project first."))
+                }
+            } else {
+                Err(anyhow::anyhow!("Not authenticated. Use '/login' first."))
+            }
+        } else {
+            Err(anyhow::anyhow!("LLM agent not initialized. Use '/login' to initialize."))
+        }
+    }
+
+    async fn handle_issues_command(&mut self, command: &str) -> Result<()> {
+        println!("📋 Fetching project issues...");
+        
+        let query = if command.len() > 8 && command.starts_with("/issues ") {
+            let filter_text = &command[8..].trim();
+            format!("List issues in this project that match or relate to: {}", filter_text)
+        } else {
+            "List the current open issues in this project".to_string()
+        };
+        
+        match self.query_with_context(&query).await {
+            Ok(response) => {
+                println!("\n{}", response);
+            }
+            Err(e) => {
+                println!("❌ {}", e);
+            }
+        }
+        Ok(())
+    }
+    
+    async fn handle_mrs_command(&mut self, command: &str) -> Result<()> {
+        println!("🔀 Fetching merge requests...");
+        
+        let query = if command.len() > 5 && command.starts_with("/mrs ") {
+            let filter_text = &command[5..].trim();
+            format!("List merge requests in this project that match or relate to: {}", filter_text)
+        } else {
+            "List the current open merge requests in this project".to_string()
+        };
+        
+        match self.query_with_context(&query).await {
+            Ok(response) => {
+                println!("\n{}", response);
+            }
+            Err(e) => {
+                println!("❌ {}", e);
+            }
+        }
+        Ok(())
+    }
+    
+    async fn handle_project_command(&mut self, command: &str) -> Result<()> {
+        let project_id = command[9..].trim(); // Remove "/project "
+        if project_id.is_empty() {
+            println!("❌ Please specify a project ID: /project <id>");
+        } else if let Some(ref mut config) = self.config {
+            config.default_project_id = Some(project_id.to_string());
+            config.save()?;
+            println!("✅ Default project set to: {}", project_id);
+        } else {
+            println!("❌ Not authenticated. Use '/login' first.");
+        }
+        Ok(())
+    }
+
     async fn cleanup(&mut self) {
         if let Some(mut process) = self.mcp_server_process.take() {
             let _ = process.kill().await;
