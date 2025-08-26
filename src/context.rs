@@ -13,7 +13,34 @@ pub struct ProjectContext {
     pub teams: HashMap<String, Vec<String>>, // team name -> list of usernames
     pub hot_issues: Vec<HotIssue>,
     pub issue_patterns: IssuePatterns,
+    pub workload_data: WorkloadData,
     pub last_updated: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct WorkloadData {
+    pub user_assignments: HashMap<String, UserWorkload>,
+    pub unassigned_issues: Vec<HotIssue>,
+    pub total_open_issues: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct UserWorkload {
+    pub username: String,
+    pub open_issues: Vec<HotIssue>,
+    pub open_mrs: Vec<MergeRequest>,
+    pub issue_count: usize,
+    pub mr_count: usize,
+    pub total_score: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MergeRequest {
+    pub id: u32,
+    pub title: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub state: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -69,6 +96,7 @@ impl ProjectContext {
             teams: HashMap::new(),
             hot_issues: Vec::new(),
             issue_patterns: IssuePatterns::default(),
+            workload_data: WorkloadData::default(),
             last_updated: None,
         }
     }
@@ -130,10 +158,13 @@ impl ProjectContext {
             context.milestones = milestones;
         }
         
-        // Fetch recent issues for activity
-        if let Ok(issues) = Self::fetch_recent_issues(&client, base_url, token, project_id).await {
+        // Fetch all open issues for activity tracking
+        if let Ok(issues) = Self::fetch_all_open_issues(&client, base_url, token, project_id).await {
             context.hot_issues = issues;
         }
+        
+        // Fetch comprehensive workload data for each user
+        context.workload_data = Self::fetch_workload_data(&client, base_url, token, project_id, &context.users).await?;
         
         context.update_timestamp();
         Ok(context)
@@ -223,8 +254,129 @@ impl ProjectContext {
         }).collect())
     }
     
-    async fn fetch_recent_issues(client: &reqwest::Client, base_url: &str, token: &str, project_id: &str) -> Result<Vec<HotIssue>> {
-        let url = format!("{}/api/v4/projects/{}/issues?per_page=20&sort=desc&order_by=updated_at", base_url, urlencoding::encode(project_id));
+    async fn fetch_all_open_issues(client: &reqwest::Client, base_url: &str, token: &str, project_id: &str) -> Result<Vec<HotIssue>> {
+        let url = format!("{}/api/v4/projects/{}/issues?state=opened&per_page=100", base_url, urlencoding::encode(project_id));
+        
+        let response = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        
+        let issues: Vec<serde_json::Value> = response.json().await?;
+        
+        Ok(issues.into_iter().map(|issue| {
+            let labels: Vec<String> = issue.get("labels")
+                .and_then(|l| l.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+            
+            // Check if assignees array exists and get the first one
+            let assignee = issue.get("assignees")
+                .and_then(|a| a.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|a| a.get("username"))
+                .and_then(|u| u.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    // Fallback to single assignee field
+                    issue.get("assignee")
+                        .and_then(|a| a.get("username"))
+                        .and_then(|u| u.as_str())
+                        .map(|s| s.to_string())
+                });
+                
+            HotIssue {
+                id: issue.get("iid").and_then(|i| i.as_u64()).unwrap_or(0) as u32,
+                title: issue.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                assignee,
+                labels,
+                state: issue.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                updated_recently: true,
+                priority: None,
+            }
+        }).collect())
+    }
+
+    async fn fetch_workload_data(
+        client: &reqwest::Client, 
+        base_url: &str, 
+        token: &str, 
+        project_id: &str,
+        users: &[ProjectUser]
+    ) -> Result<WorkloadData> {
+        let mut workload_data = WorkloadData::default();
+        
+        println!("🔄 Fetching detailed workload data for {} users...", users.len());
+        
+        // Fetch issues and MRs for each user individually
+        for (i, user) in users.iter().enumerate() {
+            if i % 10 == 0 {
+                println!("   Processing user {}/{}: {}", i + 1, users.len(), user.username);
+            }
+            
+            let mut user_workload = UserWorkload {
+                username: user.username.clone(),
+                open_issues: Vec::new(),
+                open_mrs: Vec::new(),
+                issue_count: 0,
+                mr_count: 0,
+                total_score: 0,
+            };
+            
+            // Fetch user's open issues
+            if let Ok(issues) = Self::fetch_user_issues(client, base_url, token, project_id, &user.username).await {
+                user_workload.issue_count = issues.len();
+                user_workload.open_issues = issues;
+            }
+            
+            // Fetch user's open MRs
+            if let Ok(mrs) = Self::fetch_user_mrs(client, base_url, token, project_id, &user.username).await {
+                user_workload.mr_count = mrs.len();
+                user_workload.open_mrs = mrs;
+            }
+            
+            // Calculate total score (issues + 2*MRs)
+            user_workload.total_score = user_workload.issue_count + (user_workload.mr_count * 2);
+            
+            // Only store users with actual work
+            if user_workload.issue_count > 0 || user_workload.mr_count > 0 {
+                workload_data.user_assignments.insert(user.username.clone(), user_workload);
+            }
+        }
+        
+        // Fetch unassigned issues
+        if let Ok(unassigned) = Self::fetch_unassigned_issues(client, base_url, token, project_id).await {
+            workload_data.unassigned_issues = unassigned;
+        }
+        
+        // Calculate total open issues
+        let total_assigned: usize = workload_data.user_assignments.values().map(|w| w.issue_count).sum();
+        workload_data.total_open_issues = total_assigned + workload_data.unassigned_issues.len();
+        
+        println!("✅ Workload data complete: {} active users, {} total issues", 
+            workload_data.user_assignments.len(), workload_data.total_open_issues);
+        
+        Ok(workload_data)
+    }
+    
+    async fn fetch_user_issues(
+        client: &reqwest::Client, 
+        base_url: &str, 
+        token: &str, 
+        project_id: &str,
+        username: &str
+    ) -> Result<Vec<HotIssue>> {
+        let url = format!(
+            "{}/api/v4/projects/{}/issues?assignee_username={}&state=opened&per_page=100",
+            base_url, 
+            urlencoding::encode(project_id),
+            urlencoding::encode(username)
+        );
         
         let response = client
             .get(&url)
@@ -247,16 +399,104 @@ impl ProjectContext {
             HotIssue {
                 id: issue.get("iid").and_then(|i| i.as_u64()).unwrap_or(0) as u32,
                 title: issue.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                assignee: issue.get("assignee")
-                    .and_then(|a| a.get("username"))
-                    .and_then(|u| u.as_str())
-                    .map(|s| s.to_string()),
+                assignee: Some(username.to_string()),
                 labels,
                 state: issue.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                 updated_recently: true,
                 priority: None,
             }
         }).collect())
+    }
+    
+    async fn fetch_user_mrs(
+        client: &reqwest::Client, 
+        base_url: &str, 
+        token: &str, 
+        project_id: &str,
+        username: &str
+    ) -> Result<Vec<MergeRequest>> {
+        let url = format!(
+            "{}/api/v4/projects/{}/merge_requests?assignee_username={}&state=opened&per_page=100",
+            base_url, 
+            urlencoding::encode(project_id),
+            urlencoding::encode(username)
+        );
+        
+        let response = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        
+        let mrs: Vec<serde_json::Value> = response.json().await?;
+        
+        Ok(mrs.into_iter().map(|mr| {
+            MergeRequest {
+                id: mr.get("iid").and_then(|i| i.as_u64()).unwrap_or(0) as u32,
+                title: mr.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                source_branch: mr.get("source_branch").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                target_branch: mr.get("target_branch").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                state: mr.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            }
+        }).collect())
+    }
+    
+    async fn fetch_unassigned_issues(
+        client: &reqwest::Client, 
+        base_url: &str, 
+        token: &str, 
+        project_id: &str
+    ) -> Result<Vec<HotIssue>> {
+        let url = format!(
+            "{}/api/v4/projects/{}/issues?state=opened&per_page=100",
+            base_url, 
+            urlencoding::encode(project_id)
+        );
+        
+        let response = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        
+        let issues: Vec<serde_json::Value> = response.json().await?;
+        
+        // Filter to only unassigned issues
+        let unassigned: Vec<HotIssue> = issues.into_iter()
+            .filter_map(|issue| {
+                let has_assignee = issue.get("assignee").and_then(|a| a.as_object()).is_some() ||
+                    issue.get("assignees").and_then(|a| a.as_array()).map_or(false, |arr| !arr.is_empty());
+                
+                if !has_assignee {
+                    let labels: Vec<String> = issue.get("labels")
+                        .and_then(|l| l.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default();
+                        
+                    Some(HotIssue {
+                        id: issue.get("iid").and_then(|i| i.as_u64()).unwrap_or(0) as u32,
+                        title: issue.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                        assignee: None,
+                        labels,
+                        state: issue.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                        updated_recently: true,
+                        priority: None,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        Ok(unassigned)
     }
 
 

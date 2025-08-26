@@ -191,6 +191,30 @@ impl GitLabTools {
         }).collect())
     }
 
+    pub async fn get_project_labels(&self) -> Result<Vec<String>> {
+        let url = format!(
+            "{}/api/v4/projects/{}/labels?per_page=100",
+            self.config.gitlab_url,
+            urlencoding::encode(self.config.default_project_id.as_deref().unwrap_or(""))
+        );
+
+        let response = self.client
+            .get(&url)
+            .header("PRIVATE-TOKEN", &self.config.api_token)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch project labels: {}", response.status()));
+        }
+
+        let labels: Vec<serde_json::Value> = response.json().await?;
+        
+        Ok(labels.into_iter()
+            .filter_map(|label| label.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            .collect())
+    }
+
     fn parse_user(&self, user_data: Option<&serde_json::Value>) -> Option<GitLabUser> {
         user_data.map(|user| {
             GitLabUser {

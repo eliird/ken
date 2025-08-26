@@ -12,7 +12,7 @@ use crate::mcp_client::MCPClient;
 use crate::gitlab_tools::GitLabTools;
 use rig::agent::Agent;
 use rig::providers::openai;
-use rig::completion::Chat;
+use rig::completion::{Chat, Prompt};
 use mcp_core::types::ToolsListResponse;
 use tokio::process::{Child, Command};
 use std::time::Duration;
@@ -274,7 +274,7 @@ impl KenSession {
                 println!("  /issues [filter] - List project issues (optional: filter text)");
                 println!("  /mrs [filter]    - List merge requests (optional: filter text)");
                 println!("  /create         - Create new issue or merge request");
-                println!("  /workload       - Show team workload distribution");
+                println!("  /workload       - AI-enhanced team workload analysis with label weighting");
                 println!("  exit            - Quit Ken");
             }
             "/login" => {
@@ -481,10 +481,10 @@ impl KenSession {
                 }
             }
             "/workload" => {
-                println!("📊 Analyzing team workload...");
+                println!("📊 Analyzing team workload from context...");
                 
                 if let Some(ref config) = self.config {
-                    match self.analyze_workload_direct(config).await {
+                    match self.analyze_workload_from_context(config).await {
                         Ok(()) => {
                             // Analysis completed and displayed
                         }
@@ -1005,6 +1005,202 @@ tasks#"#.to_string()
         
         Ok(())
     }
+
+    async fn analyze_workload_from_context(&self, config: &Config) -> Result<()> {
+        if let Some(project_id) = &config.default_project_id {
+            let context = ProjectContext::load(project_id)?;
+            
+            if context.is_stale() {
+                println!("⚠️  Context data is stale. Run `/update-context` first for accurate analysis.");
+                return Ok(());
+            }
+            
+            if context.workload_data.user_assignments.is_empty() && context.workload_data.total_open_issues == 0 {
+                println!("⚠️  No workload data found. Run `/update-context` to fetch detailed workload information.");
+                return Ok(());
+            }
+            
+            println!("📊 **Team Workload Analysis** (from cached data)");
+            
+            // Convert workload data to sorted vector
+            let mut workloads: Vec<_> = context.workload_data.user_assignments.values().collect();
+            workloads.sort_by(|a, b| b.total_score.cmp(&a.total_score));
+            
+            println!("\n| Full Name (username) | Role | Issues | MRs | Total Score | Status |");
+            println!("|---------------------|------|--------|-----|-------------|--------|");
+            
+            for user_workload in &workloads {
+                // Find user details from context
+                let user = context.users.iter()
+                    .find(|u| u.username == user_workload.username)
+                    .map(|u| (u.name.as_deref().unwrap_or(&u.username), u.role.as_deref().unwrap_or("Member")))
+                    .unwrap_or((&user_workload.username, "Member"));
+                
+                let status = match user_workload.total_score {
+                    score if score > 15 => "🔴 High",
+                    score if score >= 8 => "🟡 Medium", 
+                    _ => "🟢 Low"
+                };
+                
+                println!("| {} ({}) | {} | {} | {} | {} | {} |",
+                    user.0,
+                    user_workload.username,
+                    user.1,
+                    user_workload.issue_count,
+                    user_workload.mr_count,
+                    user_workload.total_score,
+                    status
+                );
+            }
+            
+            // Show unassigned issues
+            if !context.workload_data.unassigned_issues.is_empty() {
+                let unassigned_count = context.workload_data.unassigned_issues.len();
+                println!("\n⚠️  **Unassigned Issues: {}**", unassigned_count);
+                
+                for issue in context.workload_data.unassigned_issues.iter().take(5) {
+                    let labels_str = if issue.labels.is_empty() { 
+                        "no labels".to_string() 
+                    } else { 
+                        issue.labels.join(", ") 
+                    };
+                    println!("   • #{} - {} [{}]", issue.id, issue.title, labels_str);
+                }
+                
+                if unassigned_count > 5 {
+                    println!("   ... and {} more", unassigned_count - 5);
+                }
+            }
+            
+            println!("\n💡 **Summary**");
+            println!("   • Active team members with work: {}", workloads.len());
+            println!("   • Total open issues: {}", context.workload_data.total_open_issues);
+            println!("   • Unassigned issues: {}", context.workload_data.unassigned_issues.len());
+            println!("   • High workload (>15): {} members", workloads.iter().filter(|w| w.total_score > 15).count());
+            println!("   • Medium workload (8-15): {} members", workloads.iter().filter(|w| w.total_score >= 8 && w.total_score <= 15).count());
+            println!("   • Low workload (<8): {} members", workloads.iter().filter(|w| w.total_score < 8).count());
+            
+            if let Some(last_updated) = &context.last_updated {
+                println!("   • Data last updated: {}", last_updated);
+            }
+            
+        } else {
+            println!("❌ No project configured. Use `/login` to set up your project.");
+        }
+        
+        Ok(())
+    }
+
+    async fn analyze_labels_with_llm(&self, labels: &[String], issues: &[crate::gitlab_tools::GitLabIssue]) -> Result<std::collections::HashMap<String, f64>> {
+        if let Some(ref agent) = self.agent {
+            // Create a summary of label usage
+            let mut label_usage = std::collections::HashMap::new();
+            for issue in issues {
+                for label in &issue.labels {
+                    *label_usage.entry(label.clone()).or_insert(0) += 1;
+                }
+            }
+            
+            let labels_with_usage: Vec<String> = labels.iter()
+                .map(|label| {
+                    let usage = label_usage.get(label).unwrap_or(&0);
+                    format!("{} (used {} times)", label, usage)
+                })
+                .collect();
+            
+            let prompt = format!(
+                "Analyze these GitLab project labels and assign complexity/priority weights from 1.0 to 3.0:
+
+Labels: {}
+
+Consider:
+- Bug-related labels (higher weight)
+- Priority indicators (critical, urgent, high)
+- Complexity indicators (complex, difficult)
+- Feature types (enhancement vs maintenance)
+- Technical debt indicators
+
+Return ONLY a JSON object mapping label names to numeric weights (1.0-3.0):
+{{\"bug\": 2.5, \"critical\": 3.0, \"enhancement\": 1.5, ...}}",
+                labels_with_usage.join(", ")
+            );
+            
+            match agent.prompt(&prompt).await {
+                Ok(response) => {
+                    // Try to parse JSON from the response
+                    let response_text = response.to_string();
+                    if let Ok(weights) = serde_json::from_str::<std::collections::HashMap<String, f64>>(&response_text) {
+                        return Ok(weights);
+                    } else {
+                        // Fallback: extract JSON from response text
+                        if let Some(start) = response_text.find('{') {
+                            if let Some(end) = response_text.rfind('}') {
+                                let json_part = &response_text[start..=end];
+                                if let Ok(weights) = serde_json::from_str::<std::collections::HashMap<String, f64>>(json_part) {
+                                    return Ok(weights);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!("⚠️  LLM analysis failed: {}, using default weights", e),
+            }
+        }
+        
+        // Fallback: default weights based on common patterns
+        let mut default_weights = std::collections::HashMap::new();
+        for label in labels {
+            let weight = match label.to_lowercase().as_str() {
+                l if l.contains("bug") || l.contains("critical") || l.contains("urgent") => 3.0,
+                l if l.contains("high") || l.contains("priority") => 2.5,
+                l if l.contains("feature") || l.contains("enhancement") => 2.0,
+                l if l.contains("documentation") || l.contains("style") => 1.2,
+                _ => 1.5,
+            };
+            default_weights.insert(label.clone(), weight);
+        }
+        Ok(default_weights)
+    }
+
+    fn calculate_weighted_score(&self, issues: &[crate::gitlab_tools::GitLabIssue], weights: &std::collections::HashMap<String, f64>) -> usize {
+        issues.iter()
+            .map(|issue| self.calculate_issue_weight(issue, weights))
+            .sum::<f64>() as usize
+    }
+
+    fn calculate_issue_weight(&self, issue: &crate::gitlab_tools::GitLabIssue, weights: &std::collections::HashMap<String, f64>) -> f64 {
+        let base_weight = 1.0;
+        let label_multiplier = issue.labels.iter()
+            .map(|label| weights.get(label).unwrap_or(&1.5))
+            .fold(1.0, |acc, &weight| acc * weight.min(3.0).max(1.0));
+        base_weight * label_multiplier
+    }
+
+    fn get_priority_labels(&self, issues: &[crate::gitlab_tools::GitLabIssue], weights: &std::collections::HashMap<String, f64>) -> String {
+        let mut high_priority_labels = std::collections::HashSet::new();
+        for issue in issues {
+            for label in &issue.labels {
+                if weights.get(label).unwrap_or(&1.5) >= &2.0 {
+                    high_priority_labels.insert(label.clone());
+                }
+            }
+        }
+        
+        let mut labels: Vec<_> = high_priority_labels.into_iter().collect();
+        labels.sort();
+        if labels.is_empty() {
+            "none".to_string()
+        } else if labels.len() <= 3 {
+            labels.join(", ")
+        } else {
+            format!("{}, +{} more", labels[..2].join(", "), labels.len() - 2)
+        }
+    }
+
+    fn has_high_priority_labels(&self, issue: &crate::gitlab_tools::GitLabIssue, weights: &std::collections::HashMap<String, f64>) -> bool {
+        issue.labels.iter().any(|label| weights.get(label).unwrap_or(&1.5) >= &2.0)
+    }
+
 
     async fn cleanup(&mut self) {
         if let Some(mut process) = self.mcp_server_process.take() {
