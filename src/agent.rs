@@ -23,19 +23,28 @@ impl AgentConfig{
             model_name: String::from("Qwen/Qwen3-32B"),
             base_url: String::from("http://llm-api.fixstars.com/"),
             api_key: String::from(""),
-            prompt: Self::read_prompt_file().unwrap_or_else(|err| {
-                eprintln!("Failed to read prompt file: {}", err);
-                String::new()
-            }),
+            prompt: Self::default_prompt(),
             max_tokens: 4000,
             temperature: 0.3,
         }
     }
 
-    fn read_prompt_file() -> io::Result<String>{
-        let prompt = "prompts/system_prompt.md";
-        let prompt = fs::read_to_string(prompt);
-        prompt
+    fn default_prompt() -> String {
+        r#"You are Ken, an AI assistant specialized in GitLab issue management.
+
+Your primary responsibilities:
+- Help users query and understand GitLab issues
+- Provide insights about project activity and status
+- Answer questions about issues, assignees, labels, and milestones
+- Suggest actionable next steps for issue management
+
+When responding:
+- Be concise and helpful
+- Use the provided project context to give accurate information
+- Format responses clearly with bullet points or numbered lists when appropriate
+- Always base responses on the actual project data provided
+
+If you don't have enough context or information, ask for clarification rather than guessing."#.to_string()
     }
 }
 
@@ -70,7 +79,7 @@ impl KenAgent{
             }
         }
         
-        let mut builder = AgentBuilder::new(model)
+        let builder = AgentBuilder::new(model)
             .preamble(&enhanced_prompt)
             .temperature(config.temperature)
             .max_tokens(config.max_tokens);

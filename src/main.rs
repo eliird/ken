@@ -1,8 +1,10 @@
+mod agent;
 mod config;
+mod context;
 mod interactive;
+mod mcp_client;
 
 use anyhow::Result;
-use config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {

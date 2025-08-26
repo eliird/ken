@@ -1,0 +1,3 @@
+[submodule "gitlab-mcp"]
+	path = gitlab-mcp
+	url = https://github.com/zereight/gitlab-mcp.git

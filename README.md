@@ -1,207 +1,89 @@
-# Ken - GitLab Issue Management Assistant
+# Ken - GitLab Assistant
 
-## Commands
+AI-powered interactive terminal for GitLab issue management.
 
-### Authentication
+## Setup
 
-#### Login
+### Prerequisites
+- Rust toolchain: https://rustup.rs/
+- Node.js (for GitLab MCP server)
+
+### Installation
 ```bash
-ken auth login
+# Clone repository
+git clone <your-repo>
+cd ken
+
+# Initialize submodules
+git submodule update --init --recursive
+
+# Build the application
+cargo build --release
+
+# Install GitLab MCP server dependencies
+cd gitlab-mcp && npm install && cd ..
 ```
 
-**Expected Output:**
-```console
-🔐 Ken - GitLab Authentication Setup
+### Environment Setup
+Create GitLab personal access token:
+1. Go to your GitLab → Settings → Access Tokens
+2. Create token with `api` scope
+3. Save the token for login
 
-GitLab Authentication Setup
-----------------------------
-Enter your GitLab URL (e.g., https://gitlab.com): repos.fixstars.com
+## Usage
 
-To create a personal access token:
-1. Go to https://repos.fixstars.com/profile/personal_access_tokens
-2. Create a token with 'api' scope
-3. Copy the token and paste it below
+Start the interactive terminal:
+```bash
+cargo run
+```
 
+### Basic Commands
+- `/login` - Authenticate with GitLab
+- `/projects` - List available projects  
+- `/project <id>` - Set default project
+- `/update-context` - Fetch project context
+- `/context` - View cached context
+- `<natural language>` - Query issues with AI
+- `/help` - Show all commands
+- `exit` - Quit
+
+### Example Session
+```
+🚀 Ken - GitLab Assistant
+Starting interactive mode...
+
+✅ Authenticated to: https://gitlab.com
+📁 Current project: my-project
+💡 Type '/help' for commands or 'exit' to quit.
+⌨️  Use TAB for autocompletion, UP/DOWN for history.
+
+Ken> /login
+🔐 GitLab Authentication Setup
+Enter your GitLab URL (e.g., https://gitlab.com): https://gitlab.com
 Enter your GitLab personal access token: 
+✅ Login successful!
 
-Enter default project ID (optional, press Enter to skip): aibooster
-
-Verifying credentials...
-✓ Successfully authenticated as: username
-✅ Configuration saved successfully!
-
-You can now use Ken to manage GitLab issues.
-```
-
-#### Check Status
-```bash
-ken auth status
-```
-
-**Expected Output:**
-```
-✅ Authenticated to: https://repos.fixstars.com
-Default project: aibooster
-✓ Successfully authenticated as: username
-Token is valid and working.
-```
-
-#### Logout
-```bash
-ken auth logout
-```
-
-**Expected Output:**
-```
-✅ Logged out successfully. Credentials removed.
-```
-
-### Project Management
-
-#### List Available Projects
-```bash
-ken project list
-ken project list --search "aibooster"
-ken project list --mine
-```
-
-**Expected Output:**
-```
+Ken> /projects
 📋 Fetching projects from GitLab...
-
 📂 Available Projects:
-─────────────────────
-  • aibooster (ID: 12345, Path: namespace/aibooster)
-  • project-name (ID: 67890, Path: namespace/project-name)
-  ... and 15 more projects
+  • my-project (ID: 123, Path: user/my-project)
+  • another-project (ID: 456, Path: user/another-project)
 
-💡 Tip: Use 'ken project set <project_id>' to set a default project
-   You can use either the numeric ID or the path (namespace/project)
-```
+Ken> /project 123
+✅ Default project set to: 123
 
-#### Set Default Project
-```bash
-ken project set "namespace/project-name"
-# or
-ken project set 12345
-```
+Ken> /update-context
+🔄 Updating project context from GitLab...
+✅ Project context updated and cached successfully!
 
-**Expected Output:**
-```
-✅ Default project set to: namespace/project-name
-```
+Ken> show me open bugs
+🤖 Processing query...
+📝 Response:
+Here are the open bugs for your project:
+- Issue #45: Login page crashes on mobile
+- Issue #67: API timeout errors
+- Issue #89: Database connection issues
 
-#### Show Current Default Project
-```bash
-ken project current
-```
-
-**Expected Output:**
-```
-📁 Current default project: namespace/project-name
-```
-
-#### Update Project Context
-```bash
-ken project update-context
-```
-
-**Expected Output:**
-```
-🔄 Updating context for project: namespace/project-name
-🔄 Refreshing project context...
-✅ Context updated successfully!
-Project context refreshed successfully with 15 labels, 8 users, and 3 milestones.
-
-📊 Context Summary:
-## Project Context for namespace/project-name
-
-**Available Labels:**
-- `bug`: Issues that are bugs (5)
-- `feature`: New feature requests (3)
-- `po-related`: Product Owner related tasks (2)
-...
-
-**Project Members:**
-- `irdali.durrani` (Developer): Irdali Durrani
-- `john.doe` (Maintainer): John Doe
-...
-
-*Context last updated: 2025-01-XX...*
-```
-
-### Issue Queries
-
-#### Query Issues with Natural Language
-```bash
-ken query "What issues are assigned to irdali.durrani?"
-ken query "Show me all open issues"
-ken query "Find issues related to authentication"
-
-# Query specific project (overrides default)
-ken query "What are the critical bugs?" --project "namespace/other-project"
-```
-
-**Expected Output:**
-```
-📁 Using default project: namespace/project-name
-🔍 Processing query: What issues are assigned to irdali.durrani?
-
-Based on the search results, here are the issues assigned to irdali.durrani:
-1. Issue #123: Fix authentication bug (Status: opened)
-2. Issue #124: Implement new feature (Status: opened)
-...
-```
-
-## Recommended Workflow
-
-### 1. First Time Setup
-```bash
-# Authenticate with GitLab
-ken auth login
-
-# Set default project
-ken project set "your-namespace/project-name"
-
-# Update project context (fetches labels, users, team info)
-ken project update-context
-```
-
-### 2. Daily Usage
-```bash
-# Smart queries that use project context
-ken query "What issues is the backend team working on?"
-ken query "Show me high priority bugs"
-ken query "What issues are assigned to PO unit?"
-
-# Update context when project structure changes
-ken project update-context
-```
-
-**Key Benefits:**
-- **Context-aware**: Ken knows your project's actual labels, users, and patterns
-- **No guessing**: Uses real GitLab data instead of assuming label names
-- **Smart routing**: Automatically tries multiple search strategies based on your project's structure
-- **Cached efficiency**: Context is fetched once and reused until refreshed
-
-### Issue Management (Coming Soon)
-
-#### Create Issue from Natural Language
-```bash
-ken issue "The app crashes when uploading files larger than 10MB"
-```
-
-#### Summarize Issue
-```bash
-ken summarize <issue_id>
-```
-
-#### Suggest Assignee
-```bash
-ken suggest <issue_id>
-```
-
-#### Check User Workload
-```bash
-ken workload @username
+Ken> exit
+👋 Goodbye!
 ```

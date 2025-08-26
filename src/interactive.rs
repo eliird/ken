@@ -6,6 +6,11 @@ use rustyline::highlight::Highlighter;
 use rustyline::validate::Validator;
 use rustyline::Context;
 use crate::config::Config;
+use crate::agent::KenAgent;
+use crate::context::ProjectContext;
+use rig::agent::Agent;
+use rig::providers::openai;
+use rig::completion::Chat;
 
 #[derive(Clone)]
 pub struct KenCompleter {
@@ -23,6 +28,8 @@ impl KenCompleter {
                 "/projects".to_string(),
                 "/project".to_string(),
                 "/current".to_string(),
+                "/context".to_string(),
+                "/update-context".to_string(),
                 "exit".to_string(),
                 "quit".to_string(),
             ],
@@ -83,7 +90,7 @@ impl Highlighter for KenCompleter {
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
         &'s self,
         prompt: &'p str,
-        default: bool,
+        _default: bool,
     ) -> std::borrow::Cow<'b, str> {
         std::borrow::Cow::Borrowed(prompt)
     }
@@ -107,6 +114,7 @@ impl Helper for KenCompleter {}
 pub struct KenSession {
     pub config: Option<Config>,
     pub editor: Editor<KenCompleter, rustyline::history::DefaultHistory>,
+    pub agent: Option<Agent<openai::CompletionModel>>,
 }
 
 impl KenSession {
@@ -120,9 +128,16 @@ impl KenSession {
         // Try to load existing config, but don't fail if it doesn't exist
         let config = Config::load().ok();
         
+        let agent = if config.is_some() {
+            Some(KenAgent::default())
+        } else {
+            None
+        };
+        
         Ok(KenSession {
             config,
             editor,
+            agent,
         })
     }
     
@@ -212,6 +227,8 @@ impl KenSession {
                 println!("  /projects       - List available projects");
                 println!("  /project <id>   - Set default project");
                 println!("  /current        - Show current project");
+                println!("  /context        - View cached project context");
+                println!("  /update-context - Update project context from GitLab");
                 println!("  exit            - Quit Ken");
             }
             "/login" => {
@@ -223,6 +240,10 @@ impl KenSession {
                 
                 new_config.save()?;
                 self.config = Some(new_config);
+                
+                // Initialize agent after successful login
+                self.agent = Some(KenAgent::default());
+                
                 println!("✅ Login successful!");
             }
             "/logout" => {
@@ -232,6 +253,7 @@ impl KenSession {
                         std::fs::remove_file(config_path)?;
                     }
                     self.config = None;
+                    self.agent = None;
                     println!("✅ Logged out successfully!");
                 } else {
                     println!("❌ Not currently logged in.");
@@ -272,6 +294,29 @@ impl KenSession {
                     println!("❌ Not authenticated. Use '/login' first.");
                 }
             }
+            "/context" => {
+                if let Some(ref config) = self.config {
+                    if let Some(ref project_id) = config.default_project_id {
+                        match ProjectContext::load(project_id) {
+                            Ok(context) => {
+                                println!("📋 Context for project: {}", project_id);
+                                println!("🕒 Last updated: {}", context.last_updated.as_deref().unwrap_or("Never"));
+                                println!("🏷️  Labels: {}", context.labels.len());
+                                println!("👥 Users: {}", context.users.len());
+                                println!("🎯 Milestones: {}", context.milestones.len());
+                                println!("🔥 Hot issues: {}", context.hot_issues.len());
+                            }
+                            Err(_) => {
+                                println!("❌ No cached context found. Use '/update-context' first.");
+                            }
+                        }
+                    } else {
+                        println!("❌ No default project set.");
+                    }
+                } else {
+                    println!("❌ Not authenticated. Use '/login' first.");
+                }
+            }
             _ if command.starts_with("/project ") => {
                 let project_id = command[9..].trim(); // Remove "/project "
                 if project_id.is_empty() {
@@ -284,6 +329,33 @@ impl KenSession {
                     println!("❌ Not authenticated. Use '/login' first.");
                 }
             }
+            "/update-context" => {
+                if let Some(ref config) = self.config {
+                    if let Some(ref project_id) = config.default_project_id {
+                        println!("🔄 Updating project context from GitLab...");
+                        match ProjectContext::fetch_from_gitlab(config, project_id).await {
+                            Ok(context) => {
+                                // Save the context to cache
+                                if let Err(e) = context.save() {
+                                    println!("⚠️  Context fetched but failed to save: {}", e);
+                                } else {
+                                    println!("✅ Project context updated and cached successfully!");
+                                }
+                                
+                                // Reinitialize agent with updated context
+                                self.agent = Some(KenAgent::default());
+                            }
+                            Err(e) => {
+                                println!("❌ Failed to update context: {}", e);
+                            }
+                        }
+                    } else {
+                        println!("❌ No default project set. Use '/project <id>' first.");
+                    }
+                } else {
+                    println!("❌ Not authenticated. Use '/login' first.");
+                }
+            }
             _ => {
                 println!("❓ Unknown command: {}. Type '/help' for available commands.", command);
             }
@@ -292,7 +364,35 @@ impl KenSession {
     }
     
     async fn handle_query(&self, query: &str) -> Result<()> {
-        println!("🔍 Natural language queries not implemented yet: {}", query);
+        if let Some(ref agent) = self.agent {
+            if let Some(ref config) = self.config {
+                if let Some(ref project_id) = config.default_project_id {
+                    // Try to load context to enhance the query
+                    let context_info = match ProjectContext::load(project_id) {
+                        Ok(context) => context.to_prompt_context(),
+                        Err(_) => "No project context available. Use '/update-context' to fetch it.".to_string()
+                    };
+                    
+                    let enhanced_query = format!("Project Context:\n{}\n\nUser Query: {}", context_info, query);
+                    
+                    println!("🤖 Processing query...");
+                    match agent.chat(&enhanced_query, vec![]).await {
+                        Ok(response) => {
+                            println!("\n📝 Response:\n{}", response);
+                        }
+                        Err(e) => {
+                            println!("❌ Error processing query: {}", e);
+                        }
+                    }
+                } else {
+                    println!("❌ No project set. Use '/project <id>' to set a project first.");
+                }
+            } else {
+                println!("❌ Not authenticated. Use '/login' first.");
+            }
+        } else {
+            println!("❌ LLM agent not initialized. Use '/login' to initialize.");
+        }
         Ok(())
     }
 

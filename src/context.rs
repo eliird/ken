@@ -108,6 +108,157 @@ impl ProjectContext {
         Ok(())
     }
 
+    pub async fn fetch_from_gitlab(config: &crate::config::Config, project_id: &str) -> Result<Self> {
+        let mut context = Self::new(project_id.to_string());
+        
+        let client = reqwest::Client::new();
+        let base_url = &config.gitlab_url;
+        let token = &config.api_token;
+        
+        // Fetch labels
+        if let Ok(labels) = Self::fetch_labels(&client, base_url, token, project_id).await {
+            context.labels = labels;
+        }
+        
+        // Fetch project members
+        if let Ok(users) = Self::fetch_project_members(&client, base_url, token, project_id).await {
+            context.users = users;
+        }
+        
+        // Fetch milestones
+        if let Ok(milestones) = Self::fetch_milestones(&client, base_url, token, project_id).await {
+            context.milestones = milestones;
+        }
+        
+        // Fetch recent issues for activity
+        if let Ok(issues) = Self::fetch_recent_issues(&client, base_url, token, project_id).await {
+            context.hot_issues = issues;
+        }
+        
+        context.update_timestamp();
+        Ok(context)
+    }
+    
+    async fn fetch_labels(client: &reqwest::Client, base_url: &str, token: &str, project_id: &str) -> Result<Vec<ProjectLabel>> {
+        let url = format!("{}/api/v4/projects/{}/labels?per_page=100", base_url, urlencoding::encode(project_id));
+        
+        let response = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        
+        let labels: Vec<serde_json::Value> = response.json().await?;
+        
+        Ok(labels.into_iter().map(|label| {
+            ProjectLabel {
+                name: label.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                color: label.get("color").and_then(|c| c.as_str()).map(|s| s.to_string()),
+                description: label.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()),
+                usage_count: None,
+            }
+        }).collect())
+    }
+    
+    async fn fetch_project_members(client: &reqwest::Client, base_url: &str, token: &str, project_id: &str) -> Result<Vec<ProjectUser>> {
+        let url = format!("{}/api/v4/projects/{}/members/all?per_page=100", base_url, urlencoding::encode(project_id));
+        
+        let response = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        
+        let members: Vec<serde_json::Value> = response.json().await?;
+        
+        Ok(members.into_iter().map(|member| {
+            ProjectUser {
+                username: member.get("username").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+                name: member.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()),
+                email: member.get("email").and_then(|e| e.as_str()).map(|s| s.to_string()),
+                role: member.get("access_level").and_then(|a| a.as_u64()).map(|level| {
+                    match level {
+                        10 => "Guest",
+                        20 => "Reporter", 
+                        30 => "Developer",
+                        40 => "Maintainer",
+                        50 => "Owner",
+                        _ => "Member"
+                    }.to_string()
+                }),
+            }
+        }).collect())
+    }
+    
+    async fn fetch_milestones(client: &reqwest::Client, base_url: &str, token: &str, project_id: &str) -> Result<Vec<ProjectMilestone>> {
+        let url = format!("{}/api/v4/projects/{}/milestones?per_page=100", base_url, urlencoding::encode(project_id));
+        
+        let response = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        
+        let milestones: Vec<serde_json::Value> = response.json().await?;
+        
+        Ok(milestones.into_iter().map(|milestone| {
+            ProjectMilestone {
+                title: milestone.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                state: milestone.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                description: milestone.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()),
+                due_date: milestone.get("due_date").and_then(|d| d.as_str()).map(|s| s.to_string()),
+            }
+        }).collect())
+    }
+    
+    async fn fetch_recent_issues(client: &reqwest::Client, base_url: &str, token: &str, project_id: &str) -> Result<Vec<HotIssue>> {
+        let url = format!("{}/api/v4/projects/{}/issues?per_page=20&sort=desc&order_by=updated_at", base_url, urlencoding::encode(project_id));
+        
+        let response = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        
+        let issues: Vec<serde_json::Value> = response.json().await?;
+        
+        Ok(issues.into_iter().map(|issue| {
+            let labels: Vec<String> = issue.get("labels")
+                .and_then(|l| l.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+                
+            HotIssue {
+                id: issue.get("iid").and_then(|i| i.as_u64()).unwrap_or(0) as u32,
+                title: issue.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                assignee: issue.get("assignee")
+                    .and_then(|a| a.get("username"))
+                    .and_then(|u| u.as_str())
+                    .map(|s| s.to_string()),
+                labels,
+                state: issue.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                updated_recently: true,
+                priority: None,
+            }
+        }).collect())
+    }
+
 
     pub fn is_stale(&self) -> bool {
         // Consider context stale if older than 1 hour
