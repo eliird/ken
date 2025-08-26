@@ -1,6 +1,7 @@
 mod agent;
 mod cli;
 mod config;
+mod context;
 mod tools;
 
 use agent::KenAgent;
@@ -203,6 +204,33 @@ async fn main() -> Result<()> {
                 match config.default_project_id {
                     Some(project) => println!("📁 Current default project: {}", project),
                     None => println!("❌ No default project set. Use 'ken project set <project_id>' to set one."),
+                }
+            }
+            
+            ProjectCommands::UpdateContext => {
+                let config = Config::load()?;
+                let project_id = config.default_project_id.clone()
+                    .ok_or_else(|| anyhow::anyhow!("No default project set. Use 'ken project set <project_id>' first."))?;
+                
+                println!("🔄 Updating context for project: {}", project_id);
+                
+                // Use the context refresh tool with LLM processing
+                let agent = KenAgent::with_gitlab_tools(&config);
+                let query = format!("Please refresh the project context for {}. Analyze the fetched data to identify teams, common patterns, and hot issues. Save a comprehensive context that will help with future queries.", project_id);
+                
+                match agent.chat(&query, Vec::new()).await {
+                    Ok(response) => {
+                        println!("✅ Context updated successfully!");
+                        println!("{}", response);
+                        
+                        // Also save the context summary for future use
+                        let context = crate::context::ProjectContext::load(&project_id)?;
+                        println!("\n📊 Context Summary:");
+                        println!("{}", context.to_prompt_context());
+                    }
+                    Err(err) => {
+                        eprintln!("❌ Failed to update context: {}", err);
+                    }
                 }
             }
         }

@@ -91,4 +91,7 @@ pub enum ProjectCommands {
     
     /// Show current default project
     Current,
+    
+    /// Update project context (labels, users, team info)
+    UpdateContext,
 }

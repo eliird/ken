@@ -101,6 +101,35 @@ ken project current
 📁 Current default project: namespace/project-name
 ```
 
+#### Update Project Context
+```bash
+ken project update-context
+```
+
+**Expected Output:**
+```
+🔄 Updating context for project: namespace/project-name
+🔄 Refreshing project context...
+✅ Context updated successfully!
+Project context refreshed successfully with 15 labels, 8 users, and 3 milestones.
+
+📊 Context Summary:
+## Project Context for namespace/project-name
+
+**Available Labels:**
+- `bug`: Issues that are bugs (5)
+- `feature`: New feature requests (3)
+- `po-related`: Product Owner related tasks (2)
+...
+
+**Project Members:**
+- `irdali.durrani` (Developer): Irdali Durrani
+- `john.doe` (Maintainer): John Doe
+...
+
+*Context last updated: 2025-01-XX...*
+```
+
 ### Issue Queries
 
 #### Query Issues with Natural Language
@@ -123,6 +152,37 @@ Based on the search results, here are the issues assigned to irdali.durrani:
 2. Issue #124: Implement new feature (Status: opened)
 ...
 ```
+
+## Recommended Workflow
+
+### 1. First Time Setup
+```bash
+# Authenticate with GitLab
+ken auth login
+
+# Set default project
+ken project set "your-namespace/project-name"
+
+# Update project context (fetches labels, users, team info)
+ken project update-context
+```
+
+### 2. Daily Usage
+```bash
+# Smart queries that use project context
+ken query "What issues is the backend team working on?"
+ken query "Show me high priority bugs"
+ken query "What issues are assigned to PO unit?"
+
+# Update context when project structure changes
+ken project update-context
+```
+
+**Key Benefits:**
+- **Context-aware**: Ken knows your project's actual labels, users, and patterns
+- **No guessing**: Uses real GitLab data instead of assuming label names
+- **Smart routing**: Automatically tries multiple search strategies based on your project's structure
+- **Cached efficiency**: Context is fetched once and reused until refreshed
 
 ### Issue Management (Coming Soon)
 

@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 rig-core = { version = "0.13", features = ["mcp"] }
 dotenv = "0.15"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 anyhow = "1"
 serde_json = "1"
 tracing = "0.1"

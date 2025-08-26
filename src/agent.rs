@@ -14,9 +14,7 @@ pub struct AgentConfig{
     max_tokens: u64,
 }
 
-pub struct KenAgent{
-    pub agent: Agent<openai::CompletionModel>,
-}
+pub struct KenAgent;
 
 impl AgentConfig{
     pub fn default() -> Self{
@@ -28,8 +26,8 @@ impl AgentConfig{
                 eprintln!("Failed to read prompt file: {}", err);
                 String::new()
             }),
-            max_tokens: 10000,
-            temperature: 0.8,
+            max_tokens: 4000,
+            temperature: 0.3,
         }
     }
 
@@ -47,23 +45,36 @@ impl KenAgent{
         Self::get_agent(&config)
     }
 
-    pub fn agent_with_config(cfg: AgentConfig) -> Agent<openai::CompletionModel>{
-        Self::get_agent(&cfg)
-    }
     
     pub fn with_gitlab_tools(gitlab_config: &crate::config::Config) -> Agent<openai::CompletionModel> {
         let config = AgentConfig::default();
         let model = openai::Client::from_url(&config.api_key, &config.base_url)
             .completion_model(&config.model_name);
         
-        let tool = crate::tools::ListIssuesTool::from_config(gitlab_config);
+        // Build the prompt with project context if available
+        let mut enhanced_prompt = config.prompt.clone();
+        if let Some(project_id) = &gitlab_config.default_project_id {
+            if let Ok(context) = crate::context::ProjectContext::load(project_id) {
+                if !context.labels.is_empty() || !context.users.is_empty() {
+                    enhanced_prompt.push_str("\n\n");
+                    enhanced_prompt.push_str(&context.to_prompt_context());
+                }
+            }
+        }
         
-        AgentBuilder::new(model)
-            .preamble(&config.prompt)
+        let gitlab_tool = crate::tools::ListIssuesTool::from_config(gitlab_config);
+        let mut builder = AgentBuilder::new(model)
+            .preamble(&enhanced_prompt)
             .temperature(config.temperature)
             .max_tokens(config.max_tokens)
-            .tool(tool)
-            .build()
+            .tool(gitlab_tool);
+        
+        // Add context refresh tool if we have a project
+        if let Some(context_tool) = crate::tools::RefreshContextTool::from_config(gitlab_config) {
+            builder = builder.tool(context_tool);
+        }
+        
+        builder.build()
     }
 
     fn get_agent(cfg: &AgentConfig) -> Agent<openai::CompletionModel>{

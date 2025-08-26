@@ -26,7 +26,7 @@ pub struct ListIssuesInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     project_id: Option<String>,
     
-    /// Maximum number of issues to return (default: 10, max: 20)
+    /// Maximum number of issues to return (default: 20, max: 50)
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<u32>,
     
@@ -82,7 +82,7 @@ impl Tool for ListIssuesTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "List and search GitLab issues. Can filter by assignee, state, labels, and search terms. Limited to 20 issues max to prevent context overflow.".to_string(),
+            description: "List and search GitLab issues. Can filter by assignee, state, labels, and search terms. Server-side filtering for efficiency. Limited to 50 issues max.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -110,8 +110,8 @@ impl Tool for ListIssuesTool {
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 20,
-                        "description": "Maximum number of issues to return (default: 10, max: 20)"
+                        "maximum": 50,
+                        "description": "Maximum number of issues to return (default: 20, max: 50)"
                     },
                     "include_descriptions": {
                         "type": "boolean",
@@ -148,32 +148,14 @@ impl Tool for ListIssuesTool {
             params.push(format!("search={}", urlencoding::encode(&search)));
         }
         
-        // Enforce reasonable limits (max 20 to prevent context overflow)
-        let limit = input.limit.unwrap_or(10).min(20);
+        // Enforce reasonable limits (max 50 for server-side filtering, default 20)
+        let limit = input.limit.unwrap_or(20).min(50);
         params.push(format!("per_page={}", limit));
         
         // Handle assignee filter
         if let Some(username) = input.assignee_username {
-            // First get the user ID from username
-            let user_url = format!("{}/api/v4/users?username={}", self.gitlab_url, username);
-            let client = reqwest::Client::new();
-            let user_response = client
-                .get(&user_url)
-                .header("PRIVATE-TOKEN", &self.api_token)
-                .send()
-                .await
-                .map_err(|e| GitLabToolError::ApiError(format!("Failed to fetch user: {}", e)))?;
-            
-            if user_response.status().is_success() {
-                let users: Vec<Value> = user_response.json().await
-                    .map_err(|e| GitLabToolError::ApiError(format!("Failed to parse user data: {}", e)))?;
-                
-                if let Some(user) = users.first() {
-                    if let Some(user_id) = user.get("id") {
-                        params.push(format!("assignee_id={}", user_id));
-                    }
-                }
-            }
+            // GitLab API supports assignee_username parameter directly
+            params.push(format!("assignee_username={}", urlencoding::encode(&username)));
         }
         
         // Add parameters to URL
