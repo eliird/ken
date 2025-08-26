@@ -39,6 +39,7 @@ impl KenCompleter {
                 "/issues".to_string(),
                 "/mrs".to_string(),
                 "/create".to_string(),
+                "/workload".to_string(),
                 "exit".to_string(),
                 "quit".to_string(),
             ],
@@ -272,6 +273,7 @@ impl KenSession {
                 println!("  /issues [filter] - List project issues (optional: filter text)");
                 println!("  /mrs [filter]    - List merge requests (optional: filter text)");
                 println!("  /create         - Create new issue or merge request");
+                println!("  /workload       - Show team workload distribution");
                 println!("  exit            - Quit Ken");
             }
             "/login" => {
@@ -475,6 +477,28 @@ impl KenSession {
                         }
                     }
                     Err(_) => println!("❌ Failed to read input."),
+                }
+            }
+            "/workload" => {
+                println!("📊 Analyzing team workload...");
+                
+                let query = r#"I need to analyze the team workload distribution. Please follow these steps:
+
+1. First, use the `list_project_members` tool to get all project members with their full names and roles
+2. Then, for EACH team member, use the `list_issues` tool with parameters: scope='all' and assignee=username to get their open issues
+3. Then, for EACH team member, use the `list_merge_requests` tool with assignee=username to get their open MRs
+4. Count the actual numbers and calculate load scores: (Issues * 1) + (MRs * 2)
+5. Present results in table format showing only members with Load Score > 0
+
+Do NOT just use cached context data - make actual API calls with the MCP tools to get current data."#;
+                
+                match self.query_with_context(&query).await {
+                    Ok(response) => {
+                        println!("\n{}", response);
+                    }
+                    Err(e) => {
+                        println!("❌ {}", e);
+                    }
                 }
             }
             _ => {
