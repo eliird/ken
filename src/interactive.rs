@@ -1,15 +1,121 @@
 use anyhow::Result;
-use rustyline::Editor;
+use rustyline::{Editor, Helper};
+use rustyline::completion::{Completer, Pair};
+use rustyline::hint::Hinter;
+use rustyline::highlight::Highlighter;
+use rustyline::validate::Validator;
+use rustyline::Context;
 use crate::config::Config;
+
+#[derive(Clone)]
+pub struct KenCompleter {
+    commands: Vec<String>,
+}
+
+impl KenCompleter {
+    fn new() -> Self {
+        Self {
+            commands: vec![
+                "/help".to_string(),
+                "/login".to_string(),
+                "/logout".to_string(),
+                "/status".to_string(),
+                "/projects".to_string(),
+                "/project".to_string(),
+                "/current".to_string(),
+                "exit".to_string(),
+                "quit".to_string(),
+            ],
+        }
+    }
+}
+
+impl Completer for KenCompleter {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        let start = line[..pos].rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let prefix = &line[start..pos];
+
+        let matches: Vec<Pair> = self
+            .commands
+            .iter()
+            .filter(|cmd| cmd.starts_with(prefix))
+            .map(|cmd| Pair {
+                display: cmd.clone(),
+                replacement: cmd.clone(),
+            })
+            .collect();
+
+        Ok((start, matches))
+    }
+}
+
+impl Hinter for KenCompleter {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
+        if pos < line.len() {
+            return None;
+        }
+
+        let start = line.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let prefix = &line[start..];
+
+        // Don't show hints if there's no input or just whitespace
+        if prefix.is_empty() || prefix.trim().is_empty() {
+            return None;
+        }
+
+        self.commands
+            .iter()
+            .find(|cmd| cmd.starts_with(prefix) && cmd.len() > prefix.len())
+            .map(|cmd| cmd[prefix.len()..].to_string())
+    }
+}
+
+impl Highlighter for KenCompleter {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        default: bool,
+    ) -> std::borrow::Cow<'b, str> {
+        std::borrow::Cow::Borrowed(prompt)
+    }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
+        std::borrow::Cow::Borrowed(hint)
+    }
+}
+
+impl Validator for KenCompleter {
+    fn validate(
+        &self,
+        _ctx: &mut rustyline::validate::ValidationContext,
+    ) -> rustyline::Result<rustyline::validate::ValidationResult> {
+        Ok(rustyline::validate::ValidationResult::Valid(None))
+    }
+}
+
+impl Helper for KenCompleter {}
 
 pub struct KenSession {
     pub config: Option<Config>,
-    pub editor: Editor<(), rustyline::history::DefaultHistory>,
+    pub editor: Editor<KenCompleter, rustyline::history::DefaultHistory>,
 }
 
 impl KenSession {
     pub async fn new() -> Result<Self> {
-        let editor = Editor::new().map_err(|e| anyhow::anyhow!("Failed to create editor: {}", e))?;
+        let mut editor = Editor::new().map_err(|e| anyhow::anyhow!("Failed to create editor: {}", e))?;
+        
+        // Set up autocomplete
+        let completer = KenCompleter::new();
+        editor.set_helper(Some(completer));
         
         // Try to load existing config, but don't fail if it doesn't exist
         let config = Config::load().ok();
@@ -83,7 +189,8 @@ impl KenSession {
         } else {
             println!("❌ Not authenticated. Use '/login' to authenticate.");
         }
-        println!("💡 Type '/help' for commands or 'exit' to quit.\n");
+        println!("💡 Type '/help' for commands or 'exit' to quit.");
+        println!("⌨️  Use TAB for autocompletion, UP/DOWN for history.\n");
     }
     
     async fn process_input(&mut self, input: &str) -> Result<()> {
